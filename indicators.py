@@ -13,7 +13,6 @@ from functools import reduce
 current_path = Path(__file__).parent.resolve()
 cache_path = current_path / 'indicator_cache.json'
 # apikey = 'Your API key' 
-apikey = 'HHWC28L7WTD5K0V7'
 
 def __main__(f_dict):
   ### Inputs
