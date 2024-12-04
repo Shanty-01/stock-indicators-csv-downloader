@@ -36,19 +36,19 @@ Get your free API key here http://www.alphavantage.co/support/#api-key and see t
    ```
 3. Follow the prompts to input. Below is the example to produce the output/merged/merged_indicators.csv: 
      ```bash
-   Enter the company ticker symbols you want(e.g. LTH,ETD,..)
+   `Enter the company ticker symbols you want(e.g. LTH,ETD,..)`
    ABNB,ABT
    ```
      ```bash
-   Input the path to your output folder
+   `Input the path to your output folder`
    output/merged
    ```
     ```bash
-   Enter the names of technical indicator you want (e.g. WMA,MAMA,..)
+   `Enter the names of technical indicator you want (e.g. WMA,MAMA,..)`
    WMA,MAMA
    ```
     ```bash
-   Do you want to merge the result to one CSV? [Y/n]
+   `Do you want to merge the result to one CSV? [Y/n]`
    Y
    ```
     ```bash
