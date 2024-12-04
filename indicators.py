@@ -1,0 +1,524 @@
+import re
+from io import StringIO
+import json
+import os
+from itertools import product
+import pandas as pd
+import numpy as np
+import time
+import requests
+from pathlib import Path
+from functools import reduce
+
+current_path = Path(__file__).parent.resolve()
+cache_path = current_path / 'indicator_cache.json'
+apikey = 'Your API key' 
+
+def __main__(f_dict):
+  ### Inputs
+  comp_unparsed = input("Enter the company ticker symbols you want(e.g. LTH,ETD,..)\n")
+  comp_parsed = comp_unparsed.split(",")
+  company_symbols = [x.strip() for x in comp_parsed if x.strip()]
+
+  output_path = input("Input the path to your output folder\n")
+
+  unparsed = input("Enter the names of technical indicator you want (e.g. WMA,MAMA,..)\n")
+  parsed =unparsed.split(",")
+  input_func = [x.strip() for x in parsed if x.strip()]
+
+  merge = None
+  while merge not in ['Y', 'n']:
+    merge = input("Do you want to merge the result to one CSV? [Y/n]\n")
+    if merge == 'Y':
+      merge = True
+      break
+    elif merge == 'n':
+      merge = False
+      break
+    else:
+      print("Invalid input. Please enter 'Y' for Yes or 'n' for No.")   
+  
+  pattern = r'symbol=([^&]+)'
+  df = pd.DataFrame()
+  symbol = []
+  filenames = []
+
+
+  ### Check cache to load the previous configurations of the chosen indicator
+  cache = load_user_input()
+
+  if cache is None:
+      # No cached data found, get new user input
+      f_dict = user_input(input_func,f_dict)
+      # remove url functions
+      rmv_url_dict = {key : {key_ : value_ for key_,value_ in value.items() if key_ != "url"} for key, value in f_dict.items()}
+      # Save the new input to the cache file
+      save_user_input(rmv_url_dict)
+
+  else:
+      # Use the loaded input
+      for key,value in cache.items():
+        for key_,value_ in value.items():
+          f_dict[key][key_] = value_
+
+  ### Get all possible combination of urls for each company according to the configuration 
+  all_url = []
+  for symbol in company_symbols :
+    placeholder = []
+    for func in input_func :
+      # func_values = f_dict[func].values()
+      # Get all values of input configuration
+      func_values = [value for key, value in f_dict[func].items() if key != "url"]
+      # Get unique combinations of the configuration
+      combinations = product(*func_values)
+      # Generate the list of unique combination of urls and filenames 
+      urls_list, filenames = f_dict[func]["url"](combinations,filenames,symbol,apikey,func)
+      placeholder.extend(urls_list)
+    all_url.append(placeholder)
+  url_np = np.array(all_url,dtype=str)
+  trp_url = np.transpose(url_np)
+  print("The urls to access: \n",trp_url)
+
+  ### Access urls
+  df_list = []
+  for metric,filename in zip(trp_url,filenames):
+    flag = True
+    path = output_path + '/' + filename
+
+    for url in metric:
+      # Get company symbol from url
+      match = re.search(pattern, url)
+      if not match:
+         print(f'symbol for {url} not found')
+      else:
+         symbol = match.group(1)
+
+      try:
+        # Pause so not to exceed the API rate limit 
+        time.sleep(0.8)
+        response = requests.get(url)
+        if response.status_code != 200:
+           print(f"Failed to fetch data for {symbol}, {func}. Status code: {response.status_code}")
+        else :
+          csv_content = response.content.decode('utf-8')
+          df_get = pd.read_csv(StringIO(csv_content))
+          if not flag:
+            df_get['Company'] = symbol
+            df = pd.concat([df, df_get],axis=0)
+          else :
+            df = df_get.copy()
+            df['Company'] = symbol
+            flag = False
+
+      except Exception as e:
+        print(f"An error occurred for {symbol}: {str(e)}")
+
+    # check if df is empty
+    if df.empty:
+       print(f"{filename} is empty.")
+    else:
+      ### Save Output
+      # Update the column names to include the specific configuration it contains
+      df = rename_columns(df,filename) 
+      if not merge:
+        df.to_csv(path, index=False)
+        print("created: \n",path)
+      else:
+        df_list.append(df)  
+  
+  ### If merge = True
+  if merge:
+    if len(df_list) == 0 :
+      print('No data available for all urls')
+    elif len(df_list) == 1 :
+      df_list[0].to_csv(path, index=False)
+      print("created: \n",path)
+    else: 
+      # Merge with outer join
+      merged = reduce(lambda left,right: pd.merge(left, right, on=['time', 'Company'], how='outer'), df_list) 
+      # Group by company and sort them by date
+      merged = merged.groupby(['Company']).apply(lambda x : x.sort_values(by=['time']))
+      # Drop index
+      merged.reset_index(drop=True, inplace=True)
+      # Save to path
+      path = output_path + '/' + 'merged_indicators.csv'
+      merged.to_csv(path, index=False)
+      print("created: \n",path)
+  
+def rename_columns(df,filename):
+  '''
+  For a dataframe, 
+  - Update the column names to include the specific configuration it contains
+  - Handle the naming of multiple columns generated by certain indicators
+  - Drop columns containing NaN : "{}", "{", "}" caused by unavailable data 
+  '''
+  # Get the main indicator name and replace with it with itself along with its configuration
+  pattern = r'([^_]+)_'
+  match = re.search(pattern,filename)
+  if match :
+    # Get the main indicator name
+    main_col_name = match.group(1)
+  else:
+    raise Exception(f'not found function name:{filename}')
+  # Get the indicator name along with its configuration
+  replace_main_col = filename[:-4]
+  replace_dict = {main_col_name:replace_main_col}
+
+  # Handle the multiple columns generated by certain indicators
+  add_col = ['FAMA','ROCR', 'Real Upper Band', 'Real Middle Band', 'Real Lower Band']
+  to_replace = [col for col in df.columns if col in add_col]
+  if to_replace:
+    for name in to_replace:
+      rep = name + '_' + replace_main_col
+      replace_dict[name] = rep
+    
+  # Rename
+  df.rename(columns=replace_dict, inplace=True)
+
+  # Drop columns containing NaN
+  nan_col = ["{}", "{", "}"]
+  to_drop = [col for col in df.columns if col in nan_col]
+  if to_drop:
+    df.drop(columns=to_drop, inplace=True)
+  return df
+
+def user_input(input_func,f_dict):
+  '''
+  - Prompt the user to enter the configurations for each technical indicators the user entered 
+  - Handle tuple inputs for pairwise configuration
+  - Go back to the previous configuration if the user enter 'back'
+
+  Input : 
+    input_func : list of technical indicators the user entered
+    f_dict : a dictionary containing placeholders for the configuration 
+  Output : 
+    f_dict : an updated dictionary containing the configuration the user entered
+  '''
+  # list of configuration that would be entered as a tuple
+  pairs = ["fast_slow_limit_pair", "acceleration and maximum pairs", 
+           "fast_period, slow_period, and signal_period pairs",
+           'fastperiod, slowperiod pairs']
+  # Prompt the user for configuration corresponding to the entered technical indicators 
+  for func in input_func:
+    if func not in f_dict:
+       print(f'{func} is invalid technical indicator or not currently supported')
+    else:
+      in_d = f_dict[func]
+      keys = list(in_d.keys())
+      i=0
+      # Access the configurations except for the last key, which is the existing url function
+      while i < (len(keys)-1):
+        key = keys[i]
+
+        if i < (len(keys)-1):
+          if key in pairs :
+             user_input = input(f'for {func}, enter the combination of {key} in brackets e.g. (0.1,0.1),(0.25,0.25),..\n\
+                                enter: back to go back to the previous configuration\n')
+          else:
+            user_input = input(f'for {func}, enter the combination of {key} e.g. 5,10,..(numeric) or 60min,daily,..(words)\n\
+                                enter: back to go back to the previous configuration\n')
+          # Go back to the previous configuration if the user enter 'back'
+          if user_input == 'back':
+            if i == 0 :
+               print('Already at first configuration')
+            else:
+                i -= 1
+          # Handle tuple inputs
+          elif key in pairs :
+            tuple_strings = re.findall(r'\([^)]*\)', user_input)
+            list_tuple = [eval(tuple_string) for tuple_string in tuple_strings]
+            in_d[key] = list_tuple
+            print(in_d[key])
+          # Handle regular comma seperated inputs
+          else:
+            parsed = user_input.split(",")
+            input_list = [x.strip() for x in parsed if x.strip()]
+            in_d[key] = input_list
+            print(in_d[key])
+          # Go to the next configuration of a technical indicator
+          i += 1
+  return f_dict
+
+def save_user_input(dictionary, filename=cache_path):
+    '''
+    Saves dictionary to json file
+    '''
+    # Write cache to json file 
+    with open(filename, 'w') as f:
+        json.dump(dictionary, f)
+    print(f"User input saved to {filename}")
+
+def load_user_input(filename=cache_path):
+    '''
+    Load cache file if exist
+    '''
+    if os.path.exists(filename):
+        with open(filename, 'r') as f:
+            input_data = json.load(f)
+        print(f"User input loaded from {filename}")
+        return input_data
+    else:
+        print(f"No cache file found at {filename}")
+        return None
+### Functions to list the combinations of urls and filenames for the given configuration
+def wma_url(combinations,filenames,symbol,apikey,func):
+    urls = []
+    for combo in combinations:
+      interval, time_period, series_type = combo
+      url = f'https://www.alphavantage.co/query?function=WMA&symbol={symbol}&interval={interval}&time_period={time_period}&series_type={series_type}&datatype=csv&apikey={apikey}'
+      urls.append(url)
+      filename = f'{func}_{interval}_{time_period}_{series_type}.csv' 
+      filenames.append(filename)
+    return urls, filenames
+
+def mama_url(combinations,filenames,symbol,apikey,func):
+    urls = []
+    for combo in combinations:
+      interval, series_type, fast_slow_limit = combo
+      fastlimit, slowlimit = fast_slow_limit
+      url = f'https://www.alphavantage.co/query?function=MAMA&symbol={symbol}&interval={interval}&series_type={series_type}&fastlimit={fastlimit}&slowlimit={slowlimit}&datatype=csv&apikey={apikey}'
+      urls.append(url)
+      filename = f'{func}_{interval}_{series_type}_{fast_slow_limit}.csv' 
+      filenames.append(filename)
+    return urls, filenames
+def cci_url(combinations,filenames,symbol,apikey,func):
+    urls = []
+    for combo in combinations:
+      interval, time_period = combo
+      url = f'https://www.alphavantage.co/query?function=CCI&symbol={symbol}&interval={interval}&time_period={time_period}&datatype=csv&apikey={apikey}'
+      urls.append(url)
+      filename = f'{func}_{interval}_{time_period}.csv' 
+      filenames.append(filename)
+    return urls, filenames
+def roc_url(combinations,filenames,symbol,apikey,func):
+    urls = []
+    for combo in combinations:
+      interval, time_period, series_type = combo
+      url = f'https://www.alphavantage.co/query?function=ROCR&symbol={symbol}&interval={interval}&time_period={time_period}&series_type={series_type}&datatype=csv&apikey={apikey}'
+      urls.append(url)
+      filename = f'{func}_{interval}_{time_period}_{series_type}.csv' 
+      filenames.append(filename)
+    return urls, filenames
+def dx_url(combinations,filenames,symbol,apikey,func):
+    urls = []
+    for combo in combinations:
+      interval, time_period = combo
+      url = f'https://www.alphavantage.co/query?function=DX&symbol={symbol}&interval={interval}&time_period={time_period}&datatype=csv&apikey={apikey}'
+      urls.append(url)
+      filename = f'{func}_{interval}_{time_period}.csv' 
+      filenames.append(filename)
+    return urls, filenames
+def bbands_url(combinations,filenames,symbol,apikey,func):
+    urls = []
+    for combo in combinations:
+      interval, time_period, series_type, nbdevup, nbdevdn, matype = combo
+      url = f'https://www.alphavantage.co/query?function=BBANDS&symbol={symbol}&interval={interval}&time_period={time_period}&series_type={series_type}&nbdevup={nbdevup}&nbdevdn={nbdevdn}&matype={matype}&datatype=csv&apikey={apikey}'
+      urls.append(url)
+      filename = f'{func}_{interval}_{time_period}_{nbdevup}_{nbdevdn}_{matype}.csv' 
+      filenames.append(filename)
+    return urls, filenames
+def sar_url(combinations,filenames,symbol,apikey,func):
+    urls = []
+    for combo in combinations:
+      interval, acceleration_maximum = combo
+      acc, max = acceleration_maximum
+      url = f'https://www.alphavantage.co/query?function=SAR&symbol={symbol}&interval={interval}&acceleration={acc}&maximum={max}&datatype=csv&apikey={apikey}'
+      urls.append(url)
+      filename = f'{func}_{interval}_{acc}_{max}.csv' 
+      filenames.append(filename)
+    return urls, filenames
+def ht_trendline_url(combinations,filenames,symbol,apikey,func):
+    urls = []
+    for combo in combinations:
+      interval, series_type = combo
+      url = f'https://www.alphavantage.co/query?function=HT_TRENDLINE&symbol={symbol}&interval={interval}&series_type={series_type}&datatype=csv&apikey={apikey}'
+      urls.append(url)
+      filename = f'{func}_{interval}_{series_type}.csv' 
+      filenames.append(filename)
+    return urls, filenames
+def ht_sine_url(combinations,filenames,symbol,apikey,func):
+    urls = []
+    for combo in combinations:
+      interval, series_type = combo
+      url = f'https://www.alphavantage.co/query?function=HT_SINE&symbol={symbol}&interval={interval}&series_type={series_type}&datatype=csv&apikey={apikey}'
+      urls.append(url)
+      filename = f'{func}_{interval}_{series_type}.csv' 
+      filenames.append(filename)
+    return urls, filenames
+def ht_trendmode_url(combinations,filenames,symbol,apikey,func):
+    urls = []
+    for combo in combinations:
+      interval, series_type = combo
+      url = f'https://www.alphavantage.co/query?function=HT_TRENDMODE&symbol={symbol}&interval={interval}&series_type={series_type}&datatype=csv&apikey={apikey}'
+      urls.append(url)
+      filename = f'{func}_{interval}_{series_type}.csv' 
+      filenames.append(filename)
+    return urls, filenames
+
+def obv_url(combinations,filenames,symbol,apikey,func):
+    urls = []
+    for combo in combinations:
+      interval = combo[0]
+      url = f'https://www.alphavantage.co/query?function=OBV&symbol={symbol}&interval={interval}&datatype=csv&apikey={apikey}'
+      urls.append(url)
+      filename = f'{func}_{interval}.csv' 
+      filenames.append(filename)
+    return urls, filenames
+def ht_dcperiod_url(combinations,filenames,symbol,apikey,func):
+    urls = []
+    for combo in combinations:
+      interval, series_type = combo
+      url = f'https://www.alphavantage.co/query?function=HT_DCPERIOD&symbol={symbol}&interval={interval}&series_type={series_type}&datatype=csv&apikey={apikey}'
+      urls.append(url)
+      filename = f'{func}_{interval}_{series_type}.csv' 
+      filenames.append(filename)
+    return urls, filenames
+def ht_dcphase_url(combinations,filenames,symbol,apikey,func):
+    urls = []
+    for combo in combinations:
+      interval, series_type = combo
+      url = f'https://www.alphavantage.co/query?function=HT_DCPHASE&symbol={symbol}&interval={interval}&series_type={series_type}&datatype=csv&apikey={apikey}'
+      urls.append(url)
+      filename = f'{func}_{interval}_{series_type}.csv' 
+      filenames.append(filename)
+    return urls, filenames
+def macd_url(combinations,filenames,symbol,apikey,func):
+    urls = []
+    for combo in combinations:
+      interval, series_type, fast_period_slow_period_signal_period_pairs = combo
+      fastperiod , slowperiod, signalperiod = fast_period_slow_period_signal_period_pairs
+      url = f'https://www.alphavantage.co/query?function=MACD&symbol={symbol}&interval={interval}&fastperiod={fastperiod}&slowperiod={slowperiod}&signalperiod={signalperiod}&series_type={series_type}&datatype=csv&apikey={apikey}'
+      urls.append(url)
+      filename = f'{func}_{interval}_{series_type}_{fastperiod}_{slowperiod}_{signalperiod}.csv' 
+      filenames.append(filename)
+    return urls, filenames
+def apo_url(combinations,filenames,symbol,apikey,func):
+    urls = []
+    for combo in combinations:
+      interval, series_type, fastperiod_slowperiod_pairs, matype = combo
+      fastperiod, slowperiod = fastperiod_slowperiod_pairs
+      url = f'https://www.alphavantage.co/query?function=APO&symbol={symbol}&interval={interval}&series_type={series_type}&fastperiod={fastperiod}&slowperiod={slowperiod}&matype={matype}&datatype=csv&apikey={apikey}'
+      urls.append(url)
+      filename = f'{func}_{interval}_{series_type}_{fastperiod_slowperiod_pairs}_{matype}.csv' 
+      filenames.append(filename)
+    return urls, filenames
+def ppo_url(combinations,filenames,symbol,apikey,func):
+    urls = []
+    for combo in combinations:
+      interval, series_type, fastperiod_slowperiod_pairs, matype = combo
+      fastperiod, slowperiod = fastperiod_slowperiod_pairs
+      url = f'https://www.alphavantage.co/query?function=PPO&symbol={symbol}&interval={interval}&series_type={series_type}&fastperiod={fastperiod}&slowperiod={slowperiod}&matype={matype}&datatype=csv&apikey={apikey}'
+      urls.append(url)
+      filename = f'{func}_{interval}_{series_type}_{fastperiod_slowperiod_pairs}_{matype}.csv' 
+      filenames.append(filename)
+    return urls, filenames
+def natr_url(combinations,filenames,symbol,apikey,func):
+    urls = []
+    for combo in combinations:
+      interval, time_period = combo
+      url = f'https://www.alphavantage.co/query?function=NATR&symbol={symbol}&interval={interval}&time_period={time_period}&datatype=csv&apikey={apikey}'
+      urls.append(url)
+      filename = f'{func}_{interval}_{time_period}.csv' 
+      filenames.append(filename)
+    return urls, filenames
+
+f_dict = {"WMA" : {
+              "interval" : [],
+              "time_period" : [],
+              "series_type" : [],
+              "url" : wma_url
+          },
+          "MAMA" : {
+              "interval" : [],
+              "series_type" : [],
+              "fast_slow_limit_pair" : [],
+              "url" : mama_url
+              },
+          "CCI" : {
+              "interval" : [],
+              "time_period" : [],
+              "url" : cci_url
+              }, 
+          "ROC" : {
+              "interval" : [],
+              "time_period" : [],
+              "series_type" : [],
+              "url" : roc_url
+              },
+          "DX" : {
+              "interval" : [],
+              "time_period" : [],
+              "url" : dx_url
+              },  
+          "BBANDS" : {
+              "interval" : [],
+              "time_period" : [],
+              "series_type" : [],
+              "nbdevup" : [],
+              "nbdevdn" : [],
+              "matype" : [],
+              "url" : bbands_url
+              }, 
+          "SAR" : {
+              "interval" : [],
+              "acceleration and maximum pairs" : [],
+              "url" : sar_url
+              },
+          "HT_TRENDLINE" : {
+              "interval" : [],
+              "series_type" : [],
+              "url" : ht_trendline_url
+              }, 
+          "HT_SINE" : {
+              "interval" : [],
+              "series_type" : [],
+              "url" : ht_sine_url
+              },  
+          "HT_TRENDMODE" : {
+              "interval" : [],
+              "series_type" : [],
+              "url" : ht_trendmode_url
+              },  
+          "OBV" : {
+              "interval" : [],
+              "url" : obv_url
+              },     
+          "HT_DCPERIOD" : {
+              "interval" : [],
+              "series_type" : [],
+              "url" : ht_dcperiod_url
+              },     
+          "HT_DCPHASE" : {
+              "interval" : [],
+              "series_type" : [],
+              "url" : ht_dcphase_url
+              },  
+          "MACD" : {
+              "interval" : [],
+              "series_type" : [],
+              "fast_period, slow_period, and signal_period pairs": [],
+              "url" : macd_url
+              },  
+          "APO" : {
+              "interval" : [],
+              "series_type" : [],
+              "fastperiod, slowperiod pairs": [],
+              "matype": [],
+              "url" : apo_url
+              },
+          "PPO" : {
+              "interval" : [],
+              "series_type" : [],
+              'fastperiod, slowperiod pairs': [],
+              "matype": [],
+              "url" : ppo_url
+              }, 
+          "NATR" : {
+              "interval" : [],
+              "time_period" : [],
+              "url" : natr_url
+              },                                                 
+          }
+
+if __name__ == '__main__':
+  __main__(f_dict)
