@@ -26,15 +26,15 @@ Get your free API key here http://www.alphavantage.co/support/#api-key and see t
    ```
 
 ## Usage
-1. Set up your AlphaVantage API key in the indicators.py file.
+1. Set up your AlphaVantage API key in the `indicators.py` file.
    ```python
    apikey = 'Your API key'
    ```
-2. Run the indicators.py file:
+2. Run the `indicators.py` file:
    ```bash
    python indicators.py
    ```
-3. Follow the prompts to input. Below is the example to produce the output/merged/merged_indicators.csv: 
+3. Follow the prompts to input. Below is the example to produce the `output/merged/merged_indicators.csv`: 
      ```bash
    `Enter the company ticker symbols you want(e.g. LTH,ETD,..)`
    ABNB,ABT
@@ -81,10 +81,10 @@ Get your free API key here http://www.alphavantage.co/support/#api-key and see t
    enter: back to go back to the previous configuration`
    (0.1,0.1),(0.25,0.25)
    ```
-    - Once all configuration options for the chosen indicators have been exhausted, the configuration will be saved to indicator_cache.json and will be automatically loaded when the same indicators are selected again.
-    - Delete the indicator_cache.json file to build new configurations.
-    - Rename indicator_cache_extended.json to indicator_cache.json if you want to use the extended version of the existing configuration.
+    - Once all configuration options for the chosen indicators have been exhausted, the configuration will be saved to `indicator_cache.json` and will be automatically loaded when the same indicators are selected again.
+    - Delete the `indicator_cache.json` file to build new configurations.
+    - Rename `indicator_cache_extended.json` to `indicator_cache.json` if you want to use the extended version of the existing configuration.
 5. After processing, the cleaned data will be saved as CSV file(s) in the given output path.
-  - Columns result output/merged/merged_indicators.csv :
+  - Columns result `output/merged/merged_indicators.csv` :
     | time       | Company  | WMA_daily_5_close | WMA_daily_10_close| FAMA_MAMA_daily_close_(0.1, 0.1) | MAMA_daily_close_(0.1, 0.1)| FAMA_MAMA_daily_close_(0.25, 0.25)|MAMA_daily_close_(0.25, 0.25)|
     |------------------|-------------------|------------------|------------------|------------------|------------------|------------------|------------------|
